@@ -212,7 +212,10 @@ end
 
 ---@return boolean
 function __bass.initNoSound()
-	if bass.BASS_GetDevice() == 0 then
+	-- BASS_GetDevice() returns 0 when uninitialized, non-zero when initialized.
+	-- If already initialized (e.g., by the main thread), don't reinitialize.
+	if bass.BASS_GetDevice() ~= 0 then
+		load_plugins()
 		return true
 	end
 	if bass.BASS_Init(0, 44100, 0, nil, nil) == 0 then
