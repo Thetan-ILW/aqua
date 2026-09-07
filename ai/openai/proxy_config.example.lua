@@ -2,6 +2,15 @@ return {
 	host = "127.0.0.1",
 	port = 28081,
 	auth_path = "userdata/ai_auth.lua",
+	usage_db_path = "userdata/ai_proxy_usage.db",
+	-- User-provided reference prices, USD per million tokens; omitted prices cost 0.
+	model_prices = {
+		["gpt-6-astra"] = {input = 10, cached_input = 1, output = 50},
+		["gpt-5.6-sol"] = {input = 4, cached_input = 0.4, output = 20},
+		["gpt-5.6-terra"] = {input = 2, cached_input = 0.2, output = 12},
+		["gpt-5.6-luna"] = {input = 0.2, cached_input = 0.02, output = 1.2},
+		["gpt-5.4"] = {input = 2.5, cached_input = 0.25, output = 15},
+	},
 	network_path = "userdata/network.lua",
 	models = {
 		"gpt-6-astra",

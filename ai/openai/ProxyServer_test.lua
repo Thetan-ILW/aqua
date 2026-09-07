@@ -6,6 +6,9 @@ local CosocketScheduler = require("web.luasocket.CosocketScheduler")
 local http_util = require("web.http.util")
 local json = require("web.json")
 local ProxyServer = require("ai.openai.ProxyServer")
+local UsageRepo = require("ai.openai.UsageRepo")
+local UsageDatabase = require("ai.openai.storage.UsageDatabase")
+local LjsqliteDatabase = require("rdb.db.LjsqliteDatabase")
 
 local test = {}
 
@@ -921,6 +924,50 @@ function test.rejects_unavailable_models_and_invalid_message_shapes(t)
 	t:eq(response.status, 400)
 	t:eq(json.decode(response.body).error.code, "invalid_input")
 	server:stop()
+end
+
+---@param t testing.T
+function test.persists_completion_usage(t)
+	local db = UsageDatabase(LjsqliteDatabase())
+	db.path = ":memory:"
+	db:open()
+	local repo = UsageRepo(db.models)
+	local scheduler = CosocketScheduler()
+	local server = ProxyServer({
+		scheduler = scheduler,
+		users = {{name = "alice", access_token = "proxy-secret"}},
+		models = {"model-a"},
+		usage_repo = repo,
+		create_client = function()
+			return {completeStream = function()
+				return {role = "assistant", content = "hello",
+					usage = {input_tokens = 12, output_tokens = 3, total_tokens = 15}}
+			end}
+		end,
+		logger = function() end,
+	})
+	t:assert(server:start("127.0.0.1", 0))
+	local _, port = server:getAddress()
+	port = assert(port)
+	t:eq(request(t, scheduler, port, "/v1/usage/history").status, 401)
+	for _, stream in ipairs({false, true}) do
+		local response = request(t, scheduler, port, "/v1/chat/completions", {
+			model = "model-a", messages = {{role = "user", content = "hi"}}, stream = stream,
+		}, "proxy-secret")
+		t:eq(response.status, 200)
+	end
+	local response = request(t, scheduler, port, "/v1/usage/history", nil, "proxy-secret")
+	t:eq(response.status, 200)
+	---@type {client: string, requests: integer, input_tokens: integer, output_tokens: integer, estimated_requests: integer}[]
+	local rows = json.decode(response.body).rows
+	t:eq(#rows, 1)
+	t:eq(rows[1].client, "alice")
+	t:eq(rows[1].requests, 2)
+	t:eq(rows[1].input_tokens, 24)
+	t:eq(rows[1].output_tokens, 6)
+	t:eq(rows[1].estimated_requests, 0)
+	server:stop()
+	db:close()
 end
 
 return test

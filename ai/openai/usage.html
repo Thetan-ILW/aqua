@@ -148,6 +148,15 @@
 		}
 
 		details { margin-top: 18px; }
+		#history { margin-top: 20px; }
+		#charts .card { margin-top: 16px; }
+		svg { width: 100%; height: auto; display: block; }
+		.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; }
+		select { background: var(--panel); color: var(--text); padding: 8px; }
+		table { width: 100%; border-collapse: collapse; font-size: 13px; }
+		th, td { text-align: right; padding: 8px; border-bottom: 1px solid var(--line); }
+		th:first-child, td:first-child { text-align: left; }
+		.table-scroll { overflow-x: auto; }
 
 		pre {
 			padding: 16px;
@@ -190,6 +199,19 @@
 
 		<div id="error" class="error"></div>
 		<section id="cards" class="empty muted">Usage has not been loaded yet.</section>
+		<section id="history" hidden>
+			<h2>Proxy history</h2>
+			<label>Period <select id="period"><option value="24">Last 24 hours</option><option value="168">Last 7 days</option></select></label>
+			<label>View <select id="view"><option value="total">Total</option><option value="clients">By client</option></select></label>
+			<p class="muted">Hourly buckets, including the current partial hour. Tokens use provider usage when available, otherwise a rough JSON byte / 4 estimate. Images, audio, files and unreported reasoning cannot be estimated accurately. Failed requests may have unknown output.</p>
+			<div id="charts"></div>
+			<h2>Client spending & cache efficiency</h2>
+			<p class="muted">API-equivalent cost, not a subscription bill. Cache share = reported cached input / total input tokens. Savings compare cached tokens with the ordinary input rate; missing prices count as $0. Totals use token-weighted shares, not averages of client percentages.</p>
+			<div id="totals" class="table-scroll"></div>
+			<h2>Model spending & cache efficiency</h2>
+			<p class="muted">Selected period, all clients. Calculated using current configured USD prices per million tokens, not a provider bill. Missing prices and unknown models cost $0. Token estimates are included. Cached input is part of total input, charged at its separate rate when reported; historical untracked cache is treated as ordinary input.</p>
+			<div id="model-totals" class="table-scroll"></div>
+		</section>
 		<details id="raw-wrap" hidden>
 			<summary class="muted">Raw response</summary>
 			<pre id="raw"></pre>
@@ -231,6 +253,7 @@
 				days && `${days}d`,
 				hours && `${hours}h`,
 				minutes && `${minutes}m`,
+				`${seconds % 60}s`,
 			].filter(Boolean).join(" ") || "< 1m";
 		}
 
@@ -275,6 +298,13 @@
 				createRow("Resets", formatReset(windowData))
 			);
 
+			const resetAt = typeof windowData.reset_at === "number" ? windowData.reset_at
+				: typeof windowData.reset_after_seconds === "number" ? Date.now() / 1000 + windowData.reset_after_seconds : null;
+			if (resetAt !== null) {
+				const row = createRow("Reset in", "");
+				row.lastChild.dataset.resetAt = resetAt;
+				element.append(row);
+			}
 			if (typeof windowData.limit_window_seconds === "number") {
 				element.append(createRow("Window", formatDuration(windowData.limit_window_seconds)));
 			}
@@ -318,6 +348,122 @@
 			byId("raw-wrap").hidden = false;
 		}
 
+		let historyData;
+		const palette = ["#79d8a5", "#79b8ff", "#f0bd66", "#ef767a", "#c5a0ff", "#71d6de"];
+		function renderHistory() {
+			if (!historyData) return;
+			byId("history").hidden = false;
+			const count = Number(byId("period").value);
+			const first = historyData.last_bucket - (count - 1) * 3600;
+			const rows = historyData.rows.filter(row => row.bucket >= first);
+			const clients = [...new Set(rows.map(row => row.client))].sort();
+			const names = byId("view").value === "total" ? ["Total"] : clients;
+			const metrics = ["requests", "input_tokens", "output_tokens"];
+			byId("charts").replaceChildren();
+			for (const metric of metrics) {
+				const series = names.map(name => ({name, values: Array(count).fill(0)}));
+				for (const row of rows) {
+					const index = byId("view").value === "total" ? 0 : clients.indexOf(row.client);
+					series[index].values[(row.bucket - first) / 3600] += row[metric];
+				}
+				const max = Math.max(1, ...series.flatMap(item => item.values));
+				const card = document.createElement("article");
+				card.className = "card";
+				const heading = document.createElement("h2");
+				setText(heading, metric.replaceAll("_", " "));
+				card.append(heading);
+				const ns = "http://www.w3.org/2000/svg";
+				const svg = document.createElementNS(ns, "svg");
+				svg.setAttribute("viewBox", "0 0 880 240");
+				svg.setAttribute("role", "img");
+				svg.setAttribute("aria-label", `${metric}, hourly history`);
+				function label(x, y, text, anchor = "start") {
+					const node = document.createElementNS(ns, "text");
+					node.setAttribute("x", x); node.setAttribute("y", y);
+					node.setAttribute("fill", "#9ca7b2"); node.setAttribute("font-size", "12");
+					node.setAttribute("text-anchor", anchor); setText(node, text); svg.append(node);
+				}
+				label(0, 20, max.toLocaleString()); label(0, 205, "0");
+				label(60, 232, new Date(first * 1000).toLocaleString());
+				label(865, 232, new Date(historyData.last_bucket * 1000).toLocaleString(), "end");
+				const legend = document.createElement("div"); legend.className = "legend";
+				series.forEach((item, index) => {
+					const color = palette[index % palette.length];
+					const line = document.createElementNS(ns, "polyline");
+					line.setAttribute("points", item.values.map((v, i) => `${60 + i / (count - 1) * 805},${205 - v / max * 185}`).join(" "));
+					line.setAttribute("fill", "none"); line.setAttribute("stroke", color); line.setAttribute("stroke-width", "2");
+					svg.append(line);
+					item.values.forEach((v, i) => {
+						const dot = document.createElementNS(ns, "circle");
+						dot.setAttribute("cx", 60 + i / (count - 1) * 805); dot.setAttribute("cy", 205 - v / max * 185);
+						dot.setAttribute("r", "3"); dot.setAttribute("fill", color);
+						const title = document.createElementNS(ns, "title");
+						setText(title, `${item.name}: ${v.toLocaleString()} — ${new Date((first + i * 3600) * 1000).toLocaleString()}`);
+						dot.append(title); svg.append(dot);
+					});
+					const key = document.createElement("span"); key.style.color = color;
+					setText(key, `${item.name}: ${item.values.reduce((a, b) => a + b, 0).toLocaleString()}`); legend.append(key);
+				});
+				card.append(svg, legend); byId("charts").append(card);
+			}
+			const money = new Intl.NumberFormat(undefined, {style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6});
+			const cacheShare = (cached, input) => input > 0 ? `${(cached / input * 100).toFixed(1)}%` : "—";
+			const table = document.createElement("table");
+			const header = table.insertRow();
+			["Client", "Requests", "Errors", "Input tokens", "Output tokens", "Estimated requests", "Cached input", "Cache share", "API-equivalent USD", "Cache savings USD"].forEach(text => {
+				const th = document.createElement("th"); setText(th, text); header.append(th);
+			});
+			for (const name of [null, ...clients]) {
+				const selected = name === null ? rows : rows.filter(row => row.client === name);
+				const tr = table.insertRow(); setText(tr.insertCell(), name === null ? "Total" : name);
+				for (const key of ["requests", "errors", "input_tokens", "output_tokens", "estimated_requests"]) {
+					setText(tr.insertCell(), selected.reduce((sum, row) => sum + row[key], 0).toLocaleString());
+				}
+				const sum = key => selected.reduce((total, row) => total + row[key], 0);
+				setText(tr.insertCell(), sum("cached_input_tokens").toLocaleString());
+				setText(tr.insertCell(), cacheShare(sum("cached_input_tokens"), sum("input_tokens")));
+				setText(tr.insertCell(), money.format(sum("cost_usd")));
+				setText(tr.insertCell(), money.format(sum("cache_savings_usd")));
+			}
+			byId("totals").replaceChildren(table);
+			const models = new Map();
+			const total = {input: 0, cached: 0, output: 0, cost: 0, savings: 0};
+			for (const row of rows) {
+				if (!models.has(row.model)) models.set(row.model, {input: 0, cached: 0, output: 0, cost: 0, savings: 0});
+				for (const target of [models.get(row.model), total]) {
+					target.input += row.input_tokens;
+					target.cached += row.cached_input_tokens;
+					target.output += row.output_tokens;
+					target.cost += row.cost_usd;
+					target.savings += row.cache_savings_usd;
+				}
+			}
+			const modelTable = document.createElement("table");
+			const modelHeader = modelTable.insertRow();
+			for (const text of ["Model", "Total input tokens", "Cached input (included)", "Total output tokens", "API-equivalent USD", "Cache share", "Cache savings USD"]) {
+				const th = document.createElement("th"); setText(th, text); modelHeader.append(th);
+			}
+			for (const [name, values] of [...models.entries()].sort(([a], [b]) => a.localeCompare(b)).concat([[null, total]])) {
+				const tr = modelTable.insertRow();
+				setText(tr.insertCell(), name === null ? "Total" : name || "Unknown model (legacy / invalid request)");
+				setText(tr.insertCell(), values.input.toLocaleString());
+				setText(tr.insertCell(), values.cached.toLocaleString());
+				setText(tr.insertCell(), values.output.toLocaleString());
+				setText(tr.insertCell(), money.format(values.cost));
+				setText(tr.insertCell(), cacheShare(values.cached, values.input));
+				setText(tr.insertCell(), money.format(values.savings));
+			}
+			byId("model-totals").replaceChildren(modelTable);
+		}
+		byId("period").addEventListener("change", renderHistory);
+		byId("view").addEventListener("change", renderHistory);
+		function updateCountdowns() {
+			for (const element of document.querySelectorAll("[data-reset-at]")) {
+				setText(element, formatDuration(Number(element.dataset.resetAt) - Date.now() / 1000));
+			}
+		}
+		setInterval(updateCountdowns, 1000);
+
 		function showError(message) {
 			setText(error, message);
 			error.style.display = "block";
@@ -335,6 +481,12 @@
 			setText(byId("status"), "Loading…");
 			byId("dot").className = "dot";
 
+			const historyRequest = fetch("/v1/usage/history", {
+				headers: {Authorization: `Bearer ${value}`}, cache: "no-store",
+			}).then(async response => {
+				if (!response.ok) throw new Error(`History: HTTP ${response.status}`);
+				historyData = await response.json(); renderHistory();
+			}).catch(err => { byId("history").hidden = true; historyData = null; showError(err.message); });
 			try {
 				const response = await fetch("/v1/usage", {
 					headers: {Authorization: `Bearer ${value}`},
@@ -346,6 +498,7 @@
 				}
 
 				render(data);
+				updateCountdowns();
 				setText(byId("status"), `Updated ${new Date().toLocaleTimeString()}`);
 				byId("dot").className = `dot ${data.rate_limit?.limit_reached ? "bad" : "ok"}`;
 			} catch (requestError) {
@@ -353,6 +506,7 @@
 				setText(byId("status"), "Update failed");
 				byId("dot").className = "dot bad";
 			}
+			await historyRequest;
 		}
 
 		byId("auth").addEventListener("submit", (event) => {

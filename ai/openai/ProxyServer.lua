@@ -67,6 +67,7 @@ local UsagePage = require("ai.openai.UsagePage")
 ---@field users openai.ProxyUser[]
 ---@field models string[]
 ---@field create_client fun(model: string, reasoning_effort: openai.ReasoningEffort?, request_options: openai.ProxyRequestOptions): openai.ProxyClient
+---@field usage_repo openai.UsageRepo?
 ---@field fetch_usage (fun(): table?, string?, openai.ProviderError?)?
 ---@field logger (fun(line: string))?
 ---@field max_body_size integer?
@@ -82,6 +83,7 @@ local UsagePage = require("ai.openai.UsagePage")
 ---@field models string[]
 ---@field models_set {[string]: boolean}
 ---@field create_client fun(model: string, reasoning_effort: openai.ReasoningEffort?, request_options: openai.ProxyRequestOptions): openai.ProxyClient
+---@field usage_repo openai.UsageRepo?
 ---@field fetch_usage fun(): table?, string?, openai.ProviderError?
 ---@field logger fun(line: string)
 ---@field max_body_size integer
@@ -134,6 +136,7 @@ function ProxyServer:new(options)
 	end
 	self.create_client = assert(options.create_client, "create_client is required")
 	self.fetch_usage = options.fetch_usage or function() return nil, "usage is not configured" end
+	self.usage_repo = options.usage_repo
 	self.logger = options.logger or print
 	self.max_body_size = options.max_body_size or self.max_body_size
 	self.max_concurrent_requests_per_user = options.max_concurrent_requests_per_user or self.max_concurrent_requests_per_user
@@ -735,6 +738,7 @@ end
 ---@param res web.Response
 ---@param request table
 ---@return integer status
+---@return table? result
 function ProxyServer:responses(res, request)
 	local validation_err, validation_code = validateResponsesRequest(request, self.models_set)
 	if validation_err then
@@ -756,7 +760,7 @@ function ProxyServer:responses(res, request)
 			return 502
 		end
 		sendJson(res, response)
-		return 200
+		return 200, response
 	end
 
 	local started = false
@@ -781,12 +785,13 @@ function ProxyServer:responses(res, request)
 		startEventStream(res)
 	end
 	res:send("")
-	return 200
+	return 200, response
 end
 
 ---@param res web.Response
 ---@param request table
 ---@return integer status
+---@return table? result
 function ProxyServer:complete(res, request)
 	local legacy_functions, legacy_functions_err = normalizeLegacyFunctions(request)
 	if type(request.model) ~= "string" or not self.models_set[request.model] then
@@ -937,7 +942,7 @@ function ProxyServer:complete(res, request)
 			return 502
 		end
 		sendJson(res, createCompletion(request.model, message, completion_id, created, legacy_functions))
-		return 200
+		return 200, message
 	end
 
 	local started = false
@@ -1023,7 +1028,7 @@ function ProxyServer:complete(res, request)
 	end
 	sendEvent(res, "[DONE]")
 	res:send("")
-	return 200
+	return 200, message
 end
 
 ---@param token string
@@ -1072,9 +1077,14 @@ end
 ---@param req web.Request
 ---@param res web.Response
 ---@param path string
+---@param metrics {request: table?}?
 ---@return integer status
-function ProxyServer:handleAuthenticated(req, res, path)
-	if req.method == "GET" and path == "/v1/usage" then
+---@return table? result
+function ProxyServer:handleAuthenticated(req, res, path, metrics)
+	if req.method == "GET" and path == "/v1/usage/history" and self.usage_repo then
+		sendJson(res, self.usage_repo:history(os.time()))
+		return 200
+	elseif req.method == "GET" and path == "/v1/usage" then
 		return self:usage(res)
 	elseif req.method == "GET" and path == "/v1/models" then
 		local models = {}
@@ -1114,6 +1124,7 @@ function ProxyServer:handleAuthenticated(req, res, path)
 			sendError(res, 400, "invalid JSON body: " .. tostring(decode_err or receive_err), "invalid_request_error", "invalid_json")
 			return 400
 		end
+		if metrics then metrics.request = request end
 		if path == "/v1/responses" then return self:responses(res, request) end
 		return self:complete(res, request)
 	end
@@ -1130,6 +1141,8 @@ function ProxyServer:handle(req, res, ip)
 	---@type integer
 	local status
 	local path = req.uri:match("^[^?]+") or req.uri
+	---@type {request: table?, result: table?}
+	local metrics = {}
 	if req.method == "GET" and path == "/usage" then
 		sendUsagePage(res)
 		status = 200
@@ -1148,12 +1161,16 @@ function ProxyServer:handle(req, res, ip)
 		---@type string?
 		local handle_err
 		local ok = xpcall(function()
-			status = self:handleAuthenticated(req, res, path)
+			status, metrics.result = self:handleAuthenticated(req, res, path, metrics)
 		end, function(err)
 			handle_err = debug.traceback(err, 2)
 		end)
 		self:releaseRequest(token)
 		if not ok then error(handle_err, 0) end
+	end
+	if self.usage_repo and user and req.method == "POST"
+		and (path == "/v1/chat/completions" or path == "/v1/responses") then
+		self.usage_repo:record(os.time(), user, status, metrics.request, metrics.result)
 	end
 	self.logger(("user=%s ip=%s method=%s path=%s status=%d duration=%.3fs")
 		:format(

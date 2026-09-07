@@ -9,9 +9,14 @@ local SubscriptionAuth = require("ai.openai.SubscriptionAuth")
 local SubscriptionClient = require("ai.openai.SubscriptionClient")
 local ProxyNetwork = require("ai.openai.ProxyNetwork")
 local ProxyServer = require("ai.openai.ProxyServer")
+local UsageRepo = require("ai.openai.UsageRepo")
+local UsageDatabase = require("ai.openai.storage.UsageDatabase")
+local LjsqliteDatabase = require("rdb.db.LjsqliteDatabase")
 
 ---@class openai.ProxyConfig
 ---@field auth_path string?
+---@field usage_db_path string?
+---@field model_prices {[string]: openai.ModelPrice}?
 ---@field upstream_timeout number?
 ---@field tls_cafile string?
 ---@field network_path string?
@@ -249,7 +254,11 @@ local function fetchUsage()
 	return usage
 end
 
+local usage_db = UsageDatabase(LjsqliteDatabase())
+if config.usage_db_path then usage_db.path = config.usage_db_path end
+usage_db:open()
 local server = ProxyServer({
+	usage_repo = UsageRepo(usage_db.models, config.model_prices),
 	scheduler = scheduler,
 	users = users,
 	models = assert(config.models, "proxy models are required"),
@@ -297,6 +306,7 @@ local running, run_err = pcall(function()
 	end
 end)
 server:stop()
+usage_db:close()
 if not running and not tostring(run_err):find("interrupted!", 1, true) then
 	error(run_err, 0)
 end
